@@ -19,11 +19,59 @@ import librosa
 import soundfile as sf
 import os
 import numpy as np
+from pydub.silence import split_on_silence
 
 DURATION = 6.0
 OVERLAP = 4.0
 PAD_DURATION = 0.0
 SR = 16000
+#silence windows 200ms
+WINDOW=200
+
+def find_word_boundaries(text: str, start_time: float, end_time: float):
+    """
+    Estimate word boundary timestamps using uniform distribution
+    Args:
+        text: Text segment
+        start_time: Start time of audio segment
+        end_time: End time of audio segment
+    Returns:
+        List of estimated word boundary timestamps
+    """
+    words = text.split()
+    duration = end_time - start_time
+    # Assume uniform distribution of words across duration
+    timestamps = [start_time + (i * duration / (len(words) - 1)) for i in range(len(words))]
+    return timestamps
+
+def find_chunk_boundary(audio_array: np.ndarray, sample_rate: int,
+                       start_idx: int, target_idx: int, window: int = 200) -> int:
+    """
+    Find the nearest low-energy point to use as a chunk boundary
+    Args:
+        audio_array: Audio samples
+        sample_rate: Sampling rate
+        start_idx: Start index of search window
+        target_idx: Target index for chunk boundary
+        window: Search window size in samples
+    Returns:
+        Index of chosen boundary point
+    """
+    # Define search range
+    search_start = max(start_idx, target_idx - window)
+    search_end = min(len(audio_array), target_idx + window)
+
+    # Calculate energy in small windows
+    frame_length = int(0.02 * sample_rate)  # 200ms frames
+    energies = []
+    for i in range(search_start, search_end, frame_length):
+        frame = audio_array[i:min(i + frame_length, search_end)]
+        energy = np.sum(frame ** 2)
+        energies.append((i, energy))
+
+    # Find minimum energy point
+    min_energy_idx = min(energies, key=lambda x: x[1])[0]
+    return min_energy_idx
 
 
 def get_args():
@@ -100,16 +148,27 @@ def main():
         for entry in catalog[key]:
             clip_duration = entry[1]["original_duration"]
             full_transcript = entry[1]["transcript"]
-            while start < (clip_duration - OVERLAP):
+            while start + 0.2 < (clip_duration - OVERLAP):
                 end = min(start + DURATION, clip_duration)
-                chunk = entry[0][int(start * SR):int(end * SR)]
+
+                # Find actual chunk boundary near target_end
+                if end < len(entry[0]):
+                    chunk_end = float(find_chunk_boundary(entry[0], SR,  int(start * SR), int(end * SR))) / SR
+                else:
+                    chunk_end = end
+
+
+                chunk = entry[0][int(start * SR):int(chunk_end * SR)]
+
+
                 new_audio = np.concatenate([chunk, pad_audio])
                 new_fname = os.path.join(
                     args.output_dir, key + "_" + str(index) + ".wav")
                 new_json = get_sample_json(new_audio, full_transcript, new_fname)
                 full_json.append(new_json)
                 sf.write(new_fname, new_audio, SR)
-                start = end - OVERLAP
+                overlap_new_start = float(find_chunk_boundary(entry[0], SR, int((chunk_end - OVERLAP/2 - 0.5) * SR), int((chunk_end - OVERLAP/2 )*SR))) / SR
+                start = overlap_new_start 
                 index += 1
 
     # Creates json manifest containing all newly-repacked clips
